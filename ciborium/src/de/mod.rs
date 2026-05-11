@@ -9,7 +9,7 @@ pub use error::Error;
 use alloc::{string::String, vec::Vec};
 
 use crate::{simple_type::SimpleTypeAccess, tag::TagAccess};
-use ciborium_io::Read;
+use ciborium_io::BorrowRead;
 use ciborium_ll::*;
 use serde::de::{self, value::BytesDeserializer, Deserializer as _};
 
@@ -46,16 +46,20 @@ impl<E: de::Error> Expected<E> for Header {
     }
 }
 
-/// Deserializer
-pub struct Deserializer<'b, R> {
+/// Zero-copy CBOR deserializer.
+///
+/// Borrows string and byte data directly from the input slice with lifetime
+/// `'de` rather than copying into a scratch buffer. Only works with
+/// [`BorrowRead`] readers (currently `&'de [u8]`).
+pub struct Deserializer<'de, R> {
     decoder: Decoder<R>,
-    scratch: &'b mut [u8],
     recurse: usize,
+    _marker: core::marker::PhantomData<fn() -> &'de ()>,
 }
 
 fn noop(_: u8) {}
 
-impl<'a, R: Read> Deserializer<'a, R>
+impl<'de, R: BorrowRead<'de>> Deserializer<'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -96,7 +100,6 @@ where
                 header => return Err(header.expected("integer")),
             };
 
-            let mut buffer = [0u8; 16];
             let mut value = [0u8; 16];
             let mut index = 0usize;
 
@@ -104,7 +107,7 @@ where
                 Header::Bytes(len) => {
                     let mut segments = self.decoder.bytes(len);
                     while let Some(mut segment) = segments.pull()? {
-                        while let Some(chunk) = segment.pull(&mut buffer)? {
+                        while let Some(chunk) = segment.pull_borrow()? {
                             for b in chunk {
                                 match index {
                                     16 => {
@@ -113,7 +116,7 @@ where
                                                 append(v);
                                             }
                                             append(*b);
-                                            index = 17; // Indicate overflow, see below
+                                            index = 17;
                                             continue;
                                         }
                                         return Err(de::Error::custom("bigint too large"));
@@ -123,7 +126,7 @@ where
                                         append(*b);
                                         continue;
                                     }
-                                    0 if *b == 0 => continue, // Skip leading zeros
+                                    0 if *b == 0 => continue,
                                     _ => value[index] = *b,
                                 }
 
@@ -146,7 +149,7 @@ where
     }
 }
 
-impl<'de, 'a, 'b, R: Read> de::Deserializer<'de> for &'a mut Deserializer<'b, R>
+impl<'de, R: BorrowRead<'de>> de::Deserializer<'de> for &mut Deserializer<'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -164,15 +167,9 @@ where
                 Err(..) => self.deserialize_i128(visitor),
             },
 
-            Header::Bytes(len) => match len {
-                Some(len) if len <= self.scratch.len() => self.deserialize_bytes(visitor),
-                _ => self.deserialize_byte_buf(visitor),
-            },
-
-            Header::Text(len) => match len {
-                Some(len) if len <= self.scratch.len() => self.deserialize_str(visitor),
-                _ => self.deserialize_string(visitor),
-            },
+            // Both definite and indefinite-length: borrow when possible, own when segmented
+            Header::Bytes(..) => self.deserialize_byte_buf(visitor),
+            Header::Text(..) => self.deserialize_string(visitor),
 
             Header::Array(..) => self.deserialize_seq(visitor),
             Header::Map(..) => self.deserialize_map(visitor),
@@ -216,11 +213,7 @@ where
                 let _: Header = self.decoder.pull()?;
                 visitor.visit_enum(SimpleTypeAccess::new(self, v))
             }
-            // Those have to be registered via Standard Actions or are reserved so we should error whenever we
-            // encounter one. This crate should be updated once new entries in this range are added
-            // in the IANA registry
             h @ Header::Simple(0..=31) => Err(h.expected("known simple value")),
-            // However we should support arbitrary simple types
             Header::Simple(v) => {
                 let _: Header = self.decoder.pull()?;
                 self.recurse(|me| {
@@ -339,10 +332,8 @@ where
                 Header::Tag(..) => continue,
 
                 Header::Text(Some(len)) if len <= 4 => {
-                    let mut buf = [0u8; 4];
-                    self.decoder.read_exact(&mut buf[..len])?;
-
-                    match core::str::from_utf8(&buf[..len]) {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    match core::str::from_utf8(bytes) {
                         Ok(s) => match s.chars().count() {
                             1 => visitor.visit_char(s.chars().next().unwrap()),
                             _ => Err(header.expected("char")),
@@ -363,11 +354,10 @@ where
             return match self.decoder.pull()? {
                 Header::Tag(..) => continue,
 
-                Header::Text(Some(len)) if len <= self.scratch.len() => {
-                    self.decoder.read_exact(&mut self.scratch[..len])?;
-
-                    match core::str::from_utf8(&self.scratch[..len]) {
-                        Ok(s) => visitor.visit_str(s),
+                Header::Text(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    match core::str::from_utf8(bytes) {
+                        Ok(s) => visitor.visit_borrowed_str(s),
                         Err(..) => Err(Error::Syntax(offset)),
                     }
                 }
@@ -379,19 +369,27 @@ where
 
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         loop {
+            let offset = self.decoder.offset();
+
             return match self.decoder.pull()? {
                 Header::Tag(..) => continue,
 
-                Header::Text(len) => {
-                    let mut buffer = String::new();
+                Header::Text(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    match core::str::from_utf8(bytes) {
+                        Ok(s) => visitor.visit_borrowed_str(s),
+                        Err(..) => Err(Error::Syntax(offset)),
+                    }
+                }
 
-                    let mut segments = self.decoder.text(len);
+                Header::Text(None) => {
+                    let mut buffer = String::new();
+                    let mut segments = self.decoder.text(None);
                     while let Some(mut segment) = segments.pull()? {
-                        while let Some(chunk) = segment.pull(self.scratch)? {
+                        while let Some(chunk) = segment.pull_borrow()? {
                             buffer.push_str(chunk);
                         }
                     }
-
                     visitor.visit_string(buffer)
                 }
 
@@ -405,9 +403,9 @@ where
             return match self.decoder.pull()? {
                 Header::Tag(..) => continue,
 
-                Header::Bytes(Some(len)) if len <= self.scratch.len() => {
-                    self.decoder.read_exact(&mut self.scratch[..len])?;
-                    visitor.visit_bytes(&self.scratch[..len])
+                Header::Bytes(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    visitor.visit_borrowed_bytes(bytes)
                 }
 
                 Header::Array(len) => self.recurse(|me| {
@@ -428,16 +426,19 @@ where
             return match self.decoder.pull()? {
                 Header::Tag(..) => continue,
 
-                Header::Bytes(len) => {
-                    let mut buffer = Vec::new();
+                Header::Bytes(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    visitor.visit_borrowed_bytes(bytes)
+                }
 
-                    let mut segments = self.decoder.bytes(len);
+                Header::Bytes(None) => {
+                    let mut buffer = Vec::new();
+                    let mut segments = self.decoder.bytes(None);
                     while let Some(mut segment) = segments.pull()? {
-                        while let Some(chunk) = segment.pull(self.scratch)? {
+                        while let Some(chunk) = segment.pull_borrow()? {
                             buffer.extend_from_slice(chunk);
                         }
                     }
-
                     visitor.visit_byte_buf(buffer)
                 }
 
@@ -461,16 +462,23 @@ where
                     visitor.visit_seq(access)
                 }),
 
-                Header::Bytes(len) => {
-                    let mut buffer = Vec::new();
+                Header::Bytes(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    visitor.visit_seq(BorrowedBytesAccess::<R>(
+                        0,
+                        bytes,
+                        core::marker::PhantomData,
+                    ))
+                }
 
-                    let mut segments = self.decoder.bytes(len);
+                Header::Bytes(None) => {
+                    let mut buffer = Vec::new();
+                    let mut segments = self.decoder.bytes(None);
                     while let Some(mut segment) = segments.pull()? {
-                        while let Some(chunk) = segment.pull(self.scratch)? {
+                        while let Some(chunk) = segment.pull_borrow()? {
                             buffer.extend_from_slice(chunk);
                         }
                     }
-
                     visitor.visit_seq(BytesAccess::<R>(0, buffer, core::marker::PhantomData))
                 }
 
@@ -530,17 +538,17 @@ where
             return match self.decoder.pull()? {
                 Header::Tag(..) => continue,
 
-                Header::Text(Some(len)) if len <= self.scratch.len() => {
-                    self.decoder.read_exact(&mut self.scratch[..len])?;
-
-                    match core::str::from_utf8(&self.scratch[..len]) {
-                        Ok(s) => visitor.visit_str(s),
+                Header::Text(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    match core::str::from_utf8(bytes) {
+                        Ok(s) => visitor.visit_borrowed_str(s),
                         Err(..) => Err(Error::Syntax(offset)),
                     }
                 }
-                Header::Bytes(Some(len)) if len <= self.scratch.len() => {
-                    self.decoder.read_exact(&mut self.scratch[..len])?;
-                    visitor.visit_bytes(&self.scratch[..len])
+
+                Header::Bytes(Some(len)) => {
+                    let bytes = self.decoder.borrow_exact(len)?;
+                    visitor.visit_borrowed_bytes(bytes)
                 }
 
                 header => Err(header.expected("str or bytes")),
@@ -653,9 +661,9 @@ where
     }
 }
 
-struct Access<'a, 'b, R>(&'a mut Deserializer<'b, R>, Option<usize>);
+struct Access<'a, 'de, R>(&'a mut Deserializer<'de, R>, Option<usize>);
 
-impl<'de, 'a, 'b, R: Read> de::SeqAccess<'de> for Access<'a, 'b, R>
+impl<'de, 'a, R: BorrowRead<'de>> de::SeqAccess<'de> for Access<'a, 'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -684,7 +692,7 @@ where
     }
 }
 
-impl<'de, 'a, 'b, R: Read> de::MapAccess<'de> for Access<'a, 'b, R>
+impl<'de, 'a, R: BorrowRead<'de>> de::MapAccess<'de> for Access<'a, 'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -721,7 +729,7 @@ where
     }
 }
 
-impl<'de, 'a, 'b, R: Read> de::EnumAccess<'de> for Access<'a, 'b, R>
+impl<'de, 'a, R: BorrowRead<'de>> de::EnumAccess<'de> for Access<'a, 'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -738,7 +746,7 @@ where
     }
 }
 
-impl<'de, 'a, 'b, R: Read> de::VariantAccess<'de> for Access<'a, 'b, R>
+impl<'de, 'a, R: BorrowRead<'de>> de::VariantAccess<'de> for Access<'a, 'de, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -776,9 +784,11 @@ where
     }
 }
 
+/// Sequence accessor that iterates bytes of an owned `Vec<u8>` as `u8` elements.
+/// Used for indefinite-length CBOR bytes decoded as a sequence.
 struct BytesAccess<R>(usize, Vec<u8>, core::marker::PhantomData<R>);
 
-impl<'de, R: Read> de::SeqAccess<'de> for BytesAccess<R>
+impl<'de, R: BorrowRead<'de>> de::SeqAccess<'de> for BytesAccess<R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -806,98 +816,108 @@ where
     }
 }
 
-/// Deserializes as CBOR from a type with [`impl
-/// ciborium_io::Read`](ciborium_io::Read) using a 4KB buffer on the stack.
-///
-/// If you want to deserialize faster at the cost of more memory, consider using
-/// [`from_reader_with_buffer`](from_reader_with_buffer) with a larger buffer,
-/// for example 64KB.
-#[inline]
-pub fn from_reader<T: de::DeserializeOwned, R: Read>(reader: R) -> Result<T, Error<R::Error>>
+/// Sequence accessor that iterates bytes of a borrowed `&'de [u8]` as `u8` elements.
+/// Used for definite-length CBOR bytes decoded as a sequence (zero-copy).
+struct BorrowedBytesAccess<'de, R>(usize, &'de [u8], core::marker::PhantomData<R>);
+
+impl<'de, R: BorrowRead<'de>> de::SeqAccess<'de> for BorrowedBytesAccess<'de, R>
 where
     R::Error: core::fmt::Debug,
 {
-    let mut scratch = [0; 4096];
-    from_reader_with_buffer(reader, &mut scratch)
-}
+    type Error = Error<R::Error>;
 
-/// Deserializes as CBOR from a type with [`impl
-/// ciborium_io::Read`](ciborium_io::Read), using a caller-specific buffer as a
-/// temporary scratch space.
-#[inline]
-pub fn from_reader_with_buffer<T: de::DeserializeOwned, R: Read>(
-    reader: R,
-    scratch_buffer: &mut [u8],
-) -> Result<T, Error<R::Error>>
-where
-    R::Error: core::fmt::Debug,
-{
-    let mut reader = Deserializer {
-        decoder: reader.into(),
-        scratch: scratch_buffer,
-        recurse: 256,
-    };
+    #[inline]
+    fn next_element_seed<U: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: U,
+    ) -> Result<Option<U::Value>, Self::Error> {
+        use de::IntoDeserializer;
 
-    T::deserialize(&mut reader)
-}
+        if self.0 < self.1.len() {
+            let byte = self.1[self.0];
+            self.0 += 1;
+            seed.deserialize(byte.into_deserializer()).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 
-/// Deserializes as CBOR from a type with [`impl ciborium_io::Read`](ciborium_io::Read), with
-/// a specified maximum recursion limit.  Inputs that are nested beyond the specified limit
-/// will result in [`Error::RecursionLimitExceeded`] .
-///
-/// Set a high recursion limit at your own risk (of stack exhaustion)!
-#[inline]
-pub fn from_reader_with_recursion_limit<T: de::DeserializeOwned, R: Read>(
-    reader: R,
-    recurse_limit: usize,
-) -> Result<T, Error<R::Error>>
-where
-    R::Error: core::fmt::Debug,
-{
-    let mut scratch = [0; 4096];
-
-    let mut reader = Deserializer {
-        decoder: reader.into(),
-        scratch: &mut scratch,
-        recurse: recurse_limit,
-    };
-
-    T::deserialize(&mut reader)
-}
-
-/// Returns a deserializer with a specified scratch buffer
-#[inline]
-pub fn deserializer_from_reader_with_buffer<R: Read>(
-    reader: R,
-    scratch_buffer: &mut [u8],
-) -> Deserializer<'_, R>
-where
-    R::Error: core::fmt::Debug,
-{
-    Deserializer {
-        decoder: reader.into(),
-        scratch: scratch_buffer,
-        recurse: 256,
+    #[inline]
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.1.len() - self.0)
     }
 }
 
-/// Returns a deserializer with a specified scratch buffer
-/// amd maximum recursion limit. Inputs that are nested beyond the specified limit
-/// will result in [`Error::RecursionLimitExceeded`] .
+/// Deserializes CBOR from a [`BorrowRead`] reader (e.g. `&'de [u8]`).
+///
+/// String and byte values are borrowed directly from the input with lifetime
+/// `'de`; no scratch buffer is used.
+#[inline]
+pub fn from_reader<'de, T: de::Deserialize<'de>, R: BorrowRead<'de>>(
+    reader: R,
+) -> Result<T, Error<R::Error>>
+where
+    R::Error: core::fmt::Debug,
+{
+    let mut reader = Deserializer {
+        decoder: reader.into(),
+        recurse: 256,
+        _marker: core::marker::PhantomData,
+    };
+
+    T::deserialize(&mut reader)
+}
+
+/// Deserializes CBOR from a [`BorrowRead`] reader with a custom recursion limit.
+///
+/// Inputs nested beyond `recurse_limit` levels return [`Error::RecursionLimitExceeded`].
 ///
 /// Set a high recursion limit at your own risk (of stack exhaustion)!
 #[inline]
-pub fn deserializer_from_reader_with_buffer_and_recursion_limit<R: Read>(
+pub fn from_reader_with_recursion_limit<'de, T: de::Deserialize<'de>, R: BorrowRead<'de>>(
     reader: R,
-    scratch_buffer: &mut [u8],
     recurse_limit: usize,
-) -> Deserializer<'_, R>
+) -> Result<T, Error<R::Error>>
+where
+    R::Error: core::fmt::Debug,
+{
+    let mut reader = Deserializer {
+        decoder: reader.into(),
+        recurse: recurse_limit,
+        _marker: core::marker::PhantomData,
+    };
+
+    T::deserialize(&mut reader)
+}
+
+/// Returns a [`Deserializer`] wrapping the given [`BorrowRead`] reader.
+#[inline]
+pub fn deserializer_from_reader<'de, R: BorrowRead<'de>>(reader: R) -> Deserializer<'de, R>
 where
     R::Error: core::fmt::Debug,
 {
     Deserializer {
         decoder: reader.into(),
-        scratch: scratch_buffer,
+        recurse: 256,
+        _marker: core::marker::PhantomData,
+    }
+}
+
+/// Returns a [`Deserializer`] wrapping the given [`BorrowRead`] reader with
+/// a custom recursion limit.
+///
+/// Set a high recursion limit at your own risk (of stack exhaustion)!
+#[inline]
+pub fn deserializer_from_reader_with_recursion_limit<'de, R: BorrowRead<'de>>(
+    reader: R,
+    recurse_limit: usize,
+) -> Deserializer<'de, R>
+where
+    R::Error: core::fmt::Debug,
+{
+    Deserializer {
+        decoder: reader.into(),
         recurse: recurse_limit,
+        _marker: core::marker::PhantomData,
     }
 }

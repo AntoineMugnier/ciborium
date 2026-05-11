@@ -140,7 +140,7 @@ mod seg;
 pub use dec::*;
 pub use enc::*;
 pub use hdr::*;
-pub use seg::{Segment, Segments};
+pub use seg::{BorrowParser, Segment, Segments};
 
 /// Simple value constants
 pub mod simple {

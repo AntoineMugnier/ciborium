@@ -2,7 +2,7 @@
 
 use super::*;
 
-use ciborium_io::Read;
+use ciborium_io::{BorrowRead, Read};
 
 /// An error that occurred while decoding
 #[derive(Clone, Debug)]
@@ -122,6 +122,19 @@ impl<R: Read> Decoder<R> {
     #[inline]
     pub fn push(&mut self, item: Header) {
         self.push_title(Title::from(item))
+    }
+
+    /// Borrows the next `len` bytes directly from the underlying reader,
+    /// returning a reference with the reader's input lifetime `'de`.
+    #[inline]
+    pub fn borrow_exact<'de>(&mut self, len: usize) -> Result<&'de [u8], Error<R::Error>>
+    where
+        R: BorrowRead<'de>,
+    {
+        assert!(self.buffer.is_none());
+        let data = self.reader.borrow_exact(len).map_err(Error::Io)?;
+        self.offset += len;
+        Ok(data)
     }
 
     /// Gets the current byte offset into the stream

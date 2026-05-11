@@ -7,7 +7,7 @@ use std::convert::TryFrom;
 use std::fmt::Debug;
 
 use ciborium::value::Value;
-use ciborium::{cbor, de::from_reader, de::from_reader_with_buffer, ser::into_writer};
+use ciborium::{cbor, de::from_reader, ser::into_writer};
 
 use rstest::rstest;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -314,10 +314,6 @@ fn codec<'de, T: Serialize + Clone, V: Debug + PartialEq + DeserializeOwned, F: 
     eprintln!("{:x?} == {:x?}", &value, &decoded);
     assert!(veq(&value, &decoded));
 
-    let mut scratch = vec![0; 65536];
-    let decoded: Value = from_reader_with_buffer(&bytes[..], &mut scratch).unwrap();
-    eprintln!("{:x?} == {:x?}", &value, &decoded);
-    assert!(veq(&value, &decoded));
 
     let decoded: V = value.deserialized().unwrap();
     let answer = if let Some(rt) = round_trip {

@@ -26,6 +26,45 @@ extern crate alloc;
 #[cfg(feature = "embedded-io")]
 pub mod eio;
 
+/// A trait for zero-copy reading: borrows a slice directly from the input
+/// with the input's own lifetime rather than copying into a caller-provided buffer.
+///
+/// Only implementable for in-memory readers (e.g. `&'de [u8]`).
+pub trait BorrowRead<'de>: Read {
+    /// Returns a reference to the next `len` bytes, advancing past them.
+    /// The returned lifetime `'de` is that of the original input, not of `self`.
+    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], Self::Error>;
+}
+
+#[cfg(not(feature = "std"))]
+impl<'de> BorrowRead<'de> for &'de [u8] {
+    #[inline]
+    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], EndOfFile> {
+        if len > self.len() {
+            return Err(EndOfFile(()));
+        }
+        let (prefix, suffix) = self.split_at(len);
+        *self = suffix;
+        Ok(prefix)
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'de> BorrowRead<'de> for &'de [u8] {
+    #[inline]
+    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], std::io::Error> {
+        if len > self.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "not enough bytes",
+            ));
+        }
+        let (prefix, suffix) = self.split_at(len);
+        *self = suffix;
+        Ok(prefix)
+    }
+}
+
 /// A trait indicating a type that can read bytes
 ///
 /// Note that this is similar to `std::io::Read`, but simplified for use in a
