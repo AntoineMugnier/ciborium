@@ -2,7 +2,24 @@
 
 use super::*;
 
-use ciborium_io::{BorrowRead, Read};
+use ciborium_io::Read;
+
+#[cfg(feature = "std")]
+use std::{rc::Rc, vec::Vec};
+
+#[cfg(all(feature = "alloc", not(feature = "std")))]
+use alloc::{rc::Rc, vec::Vec};
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+/// The returned lifetime `'de` is that of the original input, not of `self`.
+pub struct RcVecSLice {
+    /// The returned lifetime `'de` is that of the original input, not of `self`.
+    pub buf: Rc<Vec<u8>>,
+    /// The returned lifetime `'de` is that of the original input, not of `self`.
+    pub start_index: usize,
+    /// The returned lifetime `'de` is that of the original input, not of `self`.
+    pub len: usize,
+}
 
 /// An error that occurred while decoding
 #[derive(Clone, Debug)]
@@ -27,48 +44,47 @@ impl<T> From<T> for Error<T> {
 
 /// A decoder for deserializing CBOR items
 ///
-/// This decoder manages the low-level decoding of CBOR items into `Header`
-/// objects. It also contains utility functions for parsing segmented bytes
-/// and text inputs.
-pub struct Decoder<R> {
-    reader: R,
+/// Tracks the byte offset and a one-item push-back buffer. The reader is
+/// passed explicitly to each method so the decoder's lifetime is independent
+/// of any particular reader.
+pub struct Decoder {
     offset: usize,
     buffer: Option<Title>,
 }
 
-impl<R: Read> From<R> for Decoder<R> {
+impl Default for Decoder {
     #[inline]
-    fn from(value: R) -> Self {
+    fn default() -> Self {
         Self {
-            reader: value,
             offset: 0,
             buffer: None,
         }
     }
 }
 
-impl<R: Read> Read for Decoder<R> {
-    type Error = R::Error;
-
+impl Decoder {
+    /// Reads exactly `data.len()` bytes at the current offset, advancing the offset.
     #[inline]
-    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
+    pub fn read_exact<R: Read>(
+        &mut self,
+        reader: &mut R,
+        data: &mut [u8],
+    ) -> Result<(), R::Error> {
         assert!(self.buffer.is_none());
-        self.reader.read_exact(data)?;
+        reader.read_exact(self.offset, data)?;
         self.offset += data.len();
         Ok(())
     }
-}
 
-impl<R: Read> Decoder<R> {
     #[inline]
-    fn pull_title(&mut self) -> Result<Title, Error<R::Error>> {
+    fn pull_title<R: Read>(&mut self, reader: &mut R) -> Result<Title, Error<R::Error>> {
         if let Some(title) = self.buffer.take() {
             self.offset += title.1.as_ref().len() + 1;
             return Ok(title);
         }
 
         let mut prefix = [0u8; 1];
-        self.read_exact(&mut prefix[..])?;
+        self.read_exact(reader, &mut prefix[..])?;
 
         let major = match prefix[0] >> 5 {
             0 => Major::Positive,
@@ -92,7 +108,7 @@ impl<R: Read> Decoder<R> {
             _ => return Err(Error::Syntax(self.offset - 1)),
         };
 
-        self.read_exact(minor.as_mut())?;
+        self.read_exact(reader, minor.as_mut())?;
         Ok(Title(major, minor))
     }
 
@@ -105,9 +121,9 @@ impl<R: Read> Decoder<R> {
 
     /// Pulls the next header from the input
     #[inline]
-    pub fn pull(&mut self) -> Result<Header, Error<R::Error>> {
+    pub fn pull<R: Read>(&mut self, reader: &mut R) -> Result<Header, Error<R::Error>> {
         let offset = self.offset;
-        self.pull_title()?
+        self.pull_title(reader)?
             .try_into()
             .map_err(|_| Error::Syntax(offset))
     }
@@ -124,64 +140,58 @@ impl<R: Read> Decoder<R> {
         self.push_title(Title::from(item))
     }
 
-    /// Borrows the next `len` bytes directly from the underlying reader,
-    /// returning a reference with the reader's input lifetime `'de`.
+    /// Reads the next `len` bytes into a reference-counted buffer.
+    ///
+    /// Calls `to_rc_vec` on the reader to obtain the whole backing buffer, then
+    /// records `(start_index, len)` without copying. Only use this when the
+    /// caller needs ownership via `RcVecSLice` (e.g. `deserialize_byte_rc`).
+    #[cfg(any(feature = "alloc", feature = "std"))]
     #[inline]
-    pub fn borrow_exact<'de>(&mut self, len: usize) -> Result<&'de [u8], Error<R::Error>>
-    where
-        R: BorrowRead<'de>,
-    {
+    pub fn read_exact_rc<R: Read>(
+        &mut self,
+        reader: &mut R,
+        len: usize,
+    ) -> Result<RcVecSLice, Error<R::Error>> {
         assert!(self.buffer.is_none());
-        let data = self.reader.borrow_exact(len).map_err(Error::Io)?;
+        let buf = reader.to_rc_vec().map_err(Error::Io)?;
+        let result = RcVecSLice {
+            buf,
+            start_index: self.offset,
+            len,
+        };
         self.offset += len;
-        Ok(data)
+        Ok(result)
     }
 
     /// Gets the current byte offset into the stream
-    ///
-    /// The offset starts at zero when the decoder is created. Therefore, if
-    /// bytes were already read from the reader before the decoder was created,
-    /// you must account for this.
     #[inline]
-    pub fn offset(&mut self) -> usize {
+    pub fn offset(&self) -> usize {
         self.offset
     }
 
     /// Process an incoming bytes item
-    ///
-    /// In CBOR, bytes can be segmented. The logic for this can be a bit tricky,
-    /// so we encapsulate that logic using this function. This function **MUST**
-    /// be called immediately after first pulling a `Header::Bytes(len)` from
-    /// the wire and `len` must be provided to this function from that value.
-    ///
-    /// The `buf` parameter provides a buffer used when reading in the segmented
-    /// bytes. A large buffer will result in fewer calls to read incoming bytes
-    /// at the cost of memory usage. You should consider this trade off when
-    /// deciding the size of your buffer.
     #[inline]
-    pub fn bytes<'a>(&'a mut self, len: Option<usize>) -> Segments<'a, R, crate::seg::Bytes> {
+    pub fn bytes<'a, R: Read>(
+        &'a mut self,
+        reader: &'a mut R,
+        len: Option<usize>,
+    ) -> Segments<'a, R, crate::seg::Bytes> {
         self.push(Header::Bytes(len));
-        Segments::new(self, |header| match header {
+        Segments::new(self, reader, |header| match header {
             Header::Bytes(len) => Ok(len),
             _ => Err(()),
         })
     }
 
     /// Process an incoming text item
-    ///
-    /// In CBOR, text can be segmented. The logic for this can be a bit tricky,
-    /// so we encapsulate that logic using this function. This function **MUST**
-    /// be called immediately after first pulling a `Header::Text(len)` from
-    /// the wire and `len` must be provided to this function from that value.
-    ///
-    /// The `buf` parameter provides a buffer used when reading in the segmented
-    /// text. A large buffer will result in fewer calls to read incoming bytes
-    /// at the cost of memory usage. You should consider this trade off when
-    /// deciding the size of your buffer.
     #[inline]
-    pub fn text<'a>(&'a mut self, len: Option<usize>) -> Segments<'a, R, crate::seg::Text> {
+    pub fn text<'a, R: Read>(
+        &'a mut self,
+        reader: &'a mut R,
+        len: Option<usize>,
+    ) -> Segments<'a, R, crate::seg::Text> {
         self.push(Header::Text(len));
-        Segments::new(self, |header| match header {
+        Segments::new(self, reader, |header| match header {
             Header::Text(len) => Ok(len),
             _ => Err(()),
         })

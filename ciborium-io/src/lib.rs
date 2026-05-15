@@ -22,48 +22,15 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "std")]
+use std::{rc::Rc, vec::Vec};
+
+#[cfg(all(feature = "alloc", not(feature = "std")))]
+use alloc::{rc::Rc, vec::Vec};
+
 /// Adapters of embedded-io::{Read, Write} implementing ciborium::{Read, Write}
 #[cfg(feature = "embedded-io")]
 pub mod eio;
-
-/// A trait for zero-copy reading: borrows a slice directly from the input
-/// with the input's own lifetime rather than copying into a caller-provided buffer.
-///
-/// Only implementable for in-memory readers (e.g. `&'de [u8]`).
-pub trait BorrowRead<'de>: Read {
-    /// Returns a reference to the next `len` bytes, advancing past them.
-    /// The returned lifetime `'de` is that of the original input, not of `self`.
-    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], Self::Error>;
-}
-
-#[cfg(not(feature = "std"))]
-impl<'de> BorrowRead<'de> for &'de [u8] {
-    #[inline]
-    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], EndOfFile> {
-        if len > self.len() {
-            return Err(EndOfFile(()));
-        }
-        let (prefix, suffix) = self.split_at(len);
-        *self = suffix;
-        Ok(prefix)
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'de> BorrowRead<'de> for &'de [u8] {
-    #[inline]
-    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], std::io::Error> {
-        if len > self.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "not enough bytes",
-            ));
-        }
-        let (prefix, suffix) = self.split_at(len);
-        *self = suffix;
-        Ok(prefix)
-    }
-}
 
 /// A trait indicating a type that can read bytes
 ///
@@ -74,8 +41,35 @@ pub trait Read {
     type Error;
 
     /// Reads exactly `data.len()` bytes or fails
-    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error>;
+    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Returns a reference to the next `len` bytes, advancing past them.
+    #[cfg(any(feature = "alloc", feature = "std"))]
+    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error>;
 }
+
+/// A trait for zero-copy reading: borrows a slice directly from the input
+/// with the input's own lifetime rather than copying into a caller-provided buffer.
+///
+/// Only implementable for in-memory readers (e.g. `&'de [u8]`).
+//pub trait BorrowRead<'de>: Read {
+//    /// Returns a reference to the next `len` bytes, advancing past them.
+//    /// The returned lifetime `'de` is that of the original input, not of `self`.
+//    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], Self::Error>;
+//}
+
+//#[cfg(any(feature = "alloc", feature = "std"))]
+//impl<'de> BorrowRead<'de> for &'de [u8] {
+//    #[inline]
+//    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], EndOfFile> {
+//        if len > self.len() {
+//            return Err(EndOfFile(()));
+//        }
+//        let (prefix, suffix) = self.split_at(len);
+//        *self = suffix;
+//        Ok(prefix)
+//    }
+//}
 
 /// A trait indicating a type that can write bytes
 ///
@@ -93,16 +87,6 @@ pub trait Write {
 }
 
 #[cfg(feature = "std")]
-impl<T: std::io::Read> Read for T {
-    type Error = std::io::Error;
-
-    #[inline]
-    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
-        self.read_exact(data)
-    }
-}
-
-#[cfg(feature = "std")]
 impl<T: std::io::Write> Write for T {
     type Error = std::io::Error;
 
@@ -114,16 +98,6 @@ impl<T: std::io::Write> Write for T {
     #[inline]
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.flush()
-    }
-}
-
-#[cfg(not(feature = "std"))]
-impl<R: Read + ?Sized> Read for &mut R {
-    type Error = R::Error;
-
-    #[inline]
-    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
-        (**self).read_exact(data)
     }
 }
 
@@ -143,24 +117,46 @@ impl<W: Write + ?Sized> Write for &mut W {
 }
 
 /// An error indicating there are no more bytes to read
-#[cfg(not(feature = "std"))]
 #[derive(Clone, Debug)]
 pub struct EndOfFile(());
 
-#[cfg(not(feature = "std"))]
 impl Read for &[u8] {
     type Error = EndOfFile;
 
     #[inline]
-    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
-        if data.len() > self.len() {
+    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
+        if index + data.len() > self.len() {
             return Err(EndOfFile(()));
         }
 
-        let (prefix, suffix) = self.split_at(data.len());
-        data.copy_from_slice(prefix);
-        *self = suffix;
+        data.copy_from_slice(&self[index..index + data.len()]);
         Ok(())
+    }
+
+    #[cfg(any(feature = "alloc", feature = "std"))]
+    #[inline]
+    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
+        Ok(Rc::new(self.to_vec()))
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl Read for Rc<Vec<u8>> {
+    type Error = EndOfFile;
+
+    #[inline]
+    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
+        if index + data.len() > self.len() {
+            return Err(EndOfFile(()));
+        }
+
+        data.copy_from_slice(&self[index..index + data.len()]);
+        Ok(())
+    }
+
+    #[inline]
+    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
+        Ok(self.clone())
     }
 }
 
@@ -213,46 +209,35 @@ mod test {
 
     #[test]
     fn read_eof() {
-        let mut reader = &[1u8; 0][..];
+        let reader = &[1u8; 0][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(&mut buffer[..]).unwrap_err();
+        reader.read_exact(0, &mut buffer[..]).unwrap_err();
     }
 
     #[test]
     fn read_one() {
-        let mut reader = &[1u8; 1][..];
+        let reader = &[1u8; 1][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(&mut buffer[..]).unwrap();
+        reader.read_exact(0, &mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(&mut buffer[..]).unwrap_err();
+        reader.read_exact(1, &mut buffer[..]).unwrap_err();
     }
 
     #[test]
     fn read_two() {
-        let mut reader = &[1u8; 2][..];
+        let reader = &[1u8; 2][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(&mut buffer[..]).unwrap();
+        reader.read_exact(0, &mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(&mut buffer[..]).unwrap();
+        reader.read_exact(1, &mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(&mut buffer[..]).unwrap_err();
-    }
-
-    #[test]
-    #[cfg(feature = "std")]
-    fn read_std() {
-        let mut reader = std::io::repeat(1);
-        let mut buffer = [0u8; 2];
-
-        reader.read_exact(&mut buffer[..]).unwrap();
-        assert_eq!(buffer[0], 1);
-        assert_eq!(buffer[1], 1);
+        reader.read_exact(2, &mut buffer[..]).unwrap_err();
     }
 
     #[test]

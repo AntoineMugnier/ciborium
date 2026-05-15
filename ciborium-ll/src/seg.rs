@@ -2,7 +2,7 @@
 
 use super::*;
 
-use ciborium_io::{BorrowRead, Read};
+use ciborium_io::Read;
 
 use core::marker::PhantomData;
 
@@ -109,47 +109,13 @@ impl Parser for Text {
     }
 }
 
-/// Zero-copy variant of [`Parser`] for in-memory readers.
-///
-/// Instead of writing into a caller-supplied buffer, `parse_borrowed` takes a
-/// `&'de [u8]` slice borrowed directly from the input and returns a reference
-/// into that same slice. No copying occurs for the common, non-segmented case.
-pub trait BorrowParser<'de>: Default {
-    /// The type of item produced (e.g. `[u8]` or `str`)
-    type Item: ?Sized;
-    /// Errors that can occur during parsing (e.g. `Utf8Error` for text)
-    type Error;
-
-    /// Parse a slice already borrowed from the input.
-    fn parse_borrowed(bytes: &'de [u8]) -> Result<&'de Self::Item, Self::Error>;
-}
-
-impl<'de> BorrowParser<'de> for Bytes {
-    type Item = [u8];
-    type Error = core::convert::Infallible;
-
-    #[inline]
-    fn parse_borrowed(bytes: &'de [u8]) -> Result<&'de [u8], core::convert::Infallible> {
-        Ok(bytes)
-    }
-}
-
-impl<'de> BorrowParser<'de> for Text {
-    type Item = str;
-    type Error = core::str::Utf8Error;
-
-    #[inline]
-    fn parse_borrowed(bytes: &'de [u8]) -> Result<&'de str, core::str::Utf8Error> {
-        core::str::from_utf8(bytes)
-    }
-}
 
 /// A CBOR segment
 ///
-/// This type represents a single bytes or text segment on the wire. It can be
-/// read out in parsed chunks based on the size of the input scratch buffer.
+/// This type represents a single bytes or text segment on the wire.
 pub struct Segment<'r, R, P> {
-    reader: &'r mut Decoder<R>,
+    decoder: &'r mut Decoder,
+    reader: &'r mut R,
     unread: usize,
     offset: usize,
     parser: P,
@@ -185,7 +151,7 @@ impl<'r, R: Read, P: Parser> Segment<'r, R, P> {
         let next = &mut full[min(size, prev)..];
 
         // Read additional bytes.
-        self.reader.read_exact(next)?;
+        self.decoder.read_exact(self.reader, next)?;
         self.unread -= next.len();
 
         self.parser
@@ -195,22 +161,6 @@ impl<'r, R: Read, P: Parser> Segment<'r, R, P> {
     }
 }
 
-impl<'de, 'r, R: BorrowRead<'de>, P: BorrowParser<'de>> Segment<'r, R, P> {
-    /// Zero-copy pull: borrows the entire segment body directly from the
-    /// input with lifetime `'de`. Returns `Some` on the first call and
-    /// `None` thereafter (the whole segment is consumed in one shot).
-    #[inline]
-    pub fn pull_borrow(&mut self) -> Result<Option<&'de P::Item>, Error<R::Error>> {
-        if self.unread == 0 {
-            return Ok(None);
-        }
-        let bytes = self.reader.borrow_exact(self.unread)?;
-        self.unread = 0;
-        P::parse_borrowed(bytes)
-            .map(Some)
-            .map_err(|_| Error::Syntax(self.offset))
-    }
-}
 
 #[derive(Eq, PartialEq)]
 enum State {
@@ -224,7 +174,8 @@ enum State {
 /// CBOR allows for bytes or text items to be segmented. This type represents
 /// the state of that segmented input stream.
 pub struct Segments<'r, R, P> {
-    reader: &'r mut Decoder<R>,
+    decoder: &'r mut Decoder,
+    reader: &'r mut R,
     state: State,
     parser: PhantomData<P>,
     unwrap: fn(Header) -> Result<Option<usize>, ()>,
@@ -233,11 +184,13 @@ pub struct Segments<'r, R, P> {
 impl<'r, R, P> Segments<'r, R, P> {
     #[inline]
     pub(crate) fn new(
-        decoder: &'r mut Decoder<R>,
+        decoder: &'r mut Decoder,
+        reader: &'r mut R,
         unwrap: fn(Header) -> Result<Option<usize>, ()>,
     ) -> Self {
         Self {
-            reader: decoder,
+            decoder,
+            reader,
             state: State::Initial,
             parser: PhantomData,
             unwrap,
@@ -252,8 +205,8 @@ impl<'r, R: Read, P: Parser> Segments<'r, R, P> {
     #[inline]
     pub fn pull<'a>(&'a mut self) -> Result<Option<Segment<'a, R, P>>, Error<R::Error>> {
         while self.state != State::Finished {
-            let offset = self.reader.offset();
-            match self.reader.pull()? {
+            let offset = self.decoder.offset();
+            match self.decoder.pull(self.reader)? {
                 Header::Break => {
                     self.state = State::Finished;
                     return Ok(None);
@@ -272,6 +225,7 @@ impl<'r, R: Read, P: Parser> Segments<'r, R, P> {
                             self.state = State::Finished;
                         }
                         return Ok(Some(Segment {
+                            decoder: self.decoder,
                             reader: self.reader,
                             unread: len,
                             offset,
@@ -293,8 +247,9 @@ mod tests {
     #[test]
     fn segments() {
         fn t(data: &[u8], len: usize) {
-            let mut dec = Decoder::from(data);
-            let mut segs = Segments::<_, Bytes>::new(&mut dec, |header| match header {
+            let mut reader = data;
+            let mut dec = Decoder::default();
+            let mut segs = Segments::<_, Bytes>::new(&mut dec, &mut reader, |header| match header {
                 Header::Bytes(len) => Ok(len),
                 _ => Err(()),
             });

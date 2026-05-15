@@ -29,8 +29,8 @@ hex = "0.4"
 
 [features]
 default = ["half"]
-alloc = []
-std = ["alloc", "half/std"]
+alloc = ["ciborium-io/alloc"]
+std = ["alloc","ciborium-io/std", "half/std"]
 
 [package.metadata.docs.rs]
 all-features = true

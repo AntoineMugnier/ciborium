@@ -411,6 +411,14 @@ impl<'de> de::Deserializer<'de> for Deserializer<&Value> {
         self.deserialize_bytes(visitor)
     }
 
+    #[inline]
+    fn deserialize_byte_rc<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        self.deserialize_bytes(visitor)
+    }
+
     fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         let mut value = self.0;
         while let Value::Tag(.., v) = value {

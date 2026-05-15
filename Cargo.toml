@@ -6,3 +6,8 @@ members = [
     "ciborium-io",
     "ciborium-ll",
 ]
+
+[patch.crates-io]
+serde = { path = "../serde/serde/" }
+serde_core = { path = "../serde/serde_core/" }
+serde_derive = { path = "../serde/serde_derive/" }

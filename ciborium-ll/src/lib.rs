@@ -67,15 +67,15 @@
 //!
 //! ```rust
 //! use ciborium_ll::{Decoder, Header};
-//! use ciborium_io::Read as _;
 //!
 //! let input = b"\x6dHello, World!";
-//! let mut decoder = Decoder::from(&input[..]);
+//! let mut reader: &[u8] = &input[..];
+//! let mut decoder = Decoder::default();
 //! let mut chunks = 0;
 //!
-//! match decoder.pull().unwrap() {
+//! match decoder.pull(&mut reader).unwrap() {
 //!     Header::Text(len) => {
-//!         let mut segments = decoder.text(len);
+//!         let mut segments = decoder.text(&mut reader, len);
 //!         while let Some(mut segment) = segments.pull().unwrap() {
 //!             let mut buffer = [0u8; 7];
 //!             while let Some(chunk) = segment.pull(&mut buffer[..]).unwrap() {
@@ -140,7 +140,7 @@ mod seg;
 pub use dec::*;
 pub use enc::*;
 pub use hdr::*;
-pub use seg::{BorrowParser, Segment, Segments};
+pub use seg::{Segment, Segments};
 
 /// Simple value constants
 pub mod simple {
@@ -293,8 +293,9 @@ mod tests {
         for (header, bytes, encode) in data.iter().cloned() {
             let bytes = hex::decode(bytes).unwrap();
 
-            let mut decoder = Decoder::from(&bytes[..]);
-            match (header, decoder.pull().unwrap()) {
+            let mut reader: &[u8] = &bytes[..];
+            let mut decoder = Decoder::default();
+            match (header, decoder.pull(&mut reader).unwrap()) {
                 // NaN equality...
                 (Header::Float(l), Header::Float(r)) if l.is_nan() && r.is_nan() => (),
 
@@ -470,9 +471,10 @@ mod tests {
             let bytes = hex::decode(bytes).unwrap();
 
             // Test decoding
-            let mut decoder = Decoder::from(&bytes[..]);
+            let mut reader: &[u8] = &bytes[..];
+            let mut decoder = Decoder::default();
             for header in headers.iter() {
-                assert_eq!(*header, decoder.pull().unwrap());
+                assert_eq!(*header, decoder.pull(&mut reader).unwrap());
             }
 
             // Test encoding
