@@ -2,7 +2,7 @@
 
 use super::*;
 
-use ciborium_io::Write;
+use ciborium_io::{Write, WriteByteSlice};
 
 /// An encoder for serializing CBOR items
 ///
@@ -14,6 +14,12 @@ impl<W: Write> From<W> for Encoder<W> {
     #[inline]
     fn from(value: W) -> Self {
         Self(value)
+    }
+}
+
+impl<'a, W: Write + WriteByteSlice<'a>> WriteByteSlice<'a> for Encoder<W> {
+    fn add_slice(&mut self, data: &'a [u8]) -> Result<(), Self::Error> {
+        self.0.add_slice(data)
     }
 }
 

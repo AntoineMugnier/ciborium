@@ -43,15 +43,15 @@ pub trait Read {
     /// Reads exactly `data.len()` bytes or fails
     fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error>;
 
-    /// Returns a reference to the next `len` bytes, advancing past them.
+    /// Convert he reader to an Rc<Vec<u8>>.
     #[cfg(any(feature = "alloc", feature = "std"))]
     fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error>;
 }
 
-/// A trait for zero-copy reading: borrows a slice directly from the input
-/// with the input's own lifetime rather than copying into a caller-provided buffer.
-///
-/// Only implementable for in-memory readers (e.g. `&'de [u8]`).
+// A trait for zero-copy reading: borrows a slice directly from the input
+// with the input's own lifetime rather than copying into a caller-provided buffer.
+//
+// Only implementable for in-memory readers (e.g. `&'de [u8]`).
 //pub trait BorrowRead<'de>: Read {
 //    /// Returns a reference to the next `len` bytes, advancing past them.
 //    /// The returned lifetime `'de` is that of the original input, not of `self`.
@@ -70,6 +70,12 @@ pub trait Read {
 //        Ok(prefix)
 //    }
 //}
+
+/// A trait indicating a type that can add byte slices to its buffer
+pub trait WriteByteSlice<'a>: Write {
+    /// Add a byte slice to the Writer
+    fn add_slice(&mut self, data: &'a [u8]) -> Result<(), Self::Error>;
+}
 
 /// A trait indicating a type that can write bytes
 ///
@@ -137,6 +143,62 @@ impl Read for &[u8] {
     #[inline]
     fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
         Ok(Rc::new(self.to_vec()))
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+/// A scatter-gather writer backed by a fixed scratch buffer for encoded bytes and
+/// a `Vec` for the accumulated slice references.
+pub struct ByteSliceWriter<'a, 'b: 'a> {
+    buf: &'b mut [u8],
+    slices: Vec<&'a [u8]>,
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl<'a, 'b> ByteSliceWriter<'a, 'b> {
+    /// Creates a new `ByteSliceWriter` with the given scratch buffer and an
+    /// existing (possibly pre-allocated) slices vector.
+    pub fn new(buf: &'b mut [u8], slices: Vec<&'a [u8]>) -> Self {
+        Self { buf, slices }
+    }
+
+    /// Consumes the writer and returns the accumulated scatter-gather slice list.
+    pub fn into_vec(self) -> Vec<&'a [u8]> {
+        self.slices
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl<'a, 'b> WriteByteSlice<'a> for ByteSliceWriter<'a, 'b> {
+    fn add_slice(&mut self, data: &'a [u8]) -> Result<(), Self::Error> {
+        self.slices.push(data);
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl<'a, 'b> Write for ByteSliceWriter<'a, 'b> {
+    type Error = EndOfFile;
+    fn write_all(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        if data.len() > self.buf.len() {
+            return Err(EndOfFile(()));
+        }
+
+        let buf = core::mem::take(&mut self.buf);
+
+        let (pre, suf_buf) = buf.split_at_mut(data.len());
+
+        pre.copy_from_slice(data);
+
+        self.buf = suf_buf;
+
+        self.slices.push(pre);
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
