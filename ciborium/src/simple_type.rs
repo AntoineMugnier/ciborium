@@ -63,7 +63,7 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for &mut SimpleTypeAcc
         i8 i16 i32 i64 i128
         u8 u16 u32 u64 u128
         bool f32 f64
-        char str string
+        char str string str_rc
         bytes byte_buf byte_rc
         seq map
         struct tuple tuple_struct

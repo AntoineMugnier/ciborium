@@ -182,7 +182,6 @@ where
         let bytes_a: &'a [u8] = unsafe { core::mem::transmute(bytes) };
         Ok(self.0.add_slice(bytes_a)?)
     }
-
     #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<(), Self::Error> {
         self.0.push(Header::Bytes(Some(v.len())))?;

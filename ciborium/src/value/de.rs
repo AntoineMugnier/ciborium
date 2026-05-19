@@ -390,6 +390,12 @@ impl<'de> de::Deserializer<'de> for Deserializer<&Value> {
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_str(visitor)
     }
+    fn deserialize_str_rc<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
 
     fn deserialize_bytes<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         let mut value = self.0;

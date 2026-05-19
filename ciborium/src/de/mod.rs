@@ -11,7 +11,7 @@ use alloc::{string::String, vec::Vec};
 use crate::{simple_type::SimpleTypeAccess, tag::TagAccess};
 use ciborium_io::Read;
 use ciborium_ll::*;
-use serde::de::{self, value::BytesDeserializer, Deserializer as _};
+use serde::de::{self, value::BytesDeserializer, Deserializer as _, RcStrSlice};
 
 fn convert_rc_vec_slice(rc: RcVecSLice) -> serde::RcVecSlice {
     serde::RcVecSlice {
@@ -382,6 +382,33 @@ where
         }
     }
 
+    fn deserialize_str_rc<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        loop {
+            return match self.decoder.pull(&mut self.reader)? {
+                Header::Tag(..) => continue,
+
+                Header::Text(Some(len)) => {
+                    let ciborium_rvs = self.decoder.read_exact_rc(&mut self.reader, len)?;
+                    let serde_rvs = convert_rc_vec_slice(ciborium_rvs);
+                    visitor.visit_str_rc(RcStrSlice::new(serde_rvs))
+                }
+
+                Header::Text(None) => {
+                    let mut buffer = String::new();
+                    let mut buf = [0u8; 512];
+                    let mut segments = self.decoder.text(&mut self.reader, Some(0));
+                    while let Some(mut segment) = segments.pull()? {
+                        while let Some(chunk) = segment.pull(&mut buf)? {
+                            buffer.push_str(chunk);
+                        }
+                    }
+                    visitor.visit_string(buffer)
+                }
+
+                header => Err(header.expected("string")),
+            };
+        }
+    }
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         loop {
             return match self.decoder.pull(&mut self.reader)? {
