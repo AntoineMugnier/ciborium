@@ -21,7 +21,7 @@ is-it-maintained-issue-resolution = { repository = "enarx/ciborium" }
 is-it-maintained-open-issues = { repository = "enarx/ciborium" }
 
 [dependencies]
-ciborium-io = { path = "../ciborium-io", version = "0.2.2" }
+ciborium-io = { path = "../ciborium-io", version = "0.2.2", registry="li6" }
 half = { version = "2.6", default-features = false, optional = true }
 
 [dev-dependencies]

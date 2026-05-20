@@ -4,15 +4,12 @@ target = "wasm32-unknown-unknown"
 #
 #
 [registries.li6]
-index = "sparse+http://kumisaba.ellisys.gva/kellnr/api/v1/crates/"
+index = "sparse+http://kumisaba.ellisys.gva/rs-registry/api/v1/crates/"
 credential-provider = ["cargo:token"]
 token = "ZAYZZdOmbNbP80zSJQBlnHfVtLEXc3zN"
 
-[registry]
-default = "li6"
-
 [registries.li6-crates-io]
-index = "sparse+http://kumisaba.ellisys.gva/kellnr/api/v1/cratesio/"
+index = "sparse+http://kumisaba.ellisys.gva/rs-registry/api/v1/cratesio/"
 credential-provider = ["cargo:token"]
 token = "ZAYZZdOmbNbP80zSJQBlnHfVtLEXc3zN"
 

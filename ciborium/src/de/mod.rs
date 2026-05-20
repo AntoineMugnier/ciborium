@@ -14,11 +14,7 @@ use ciborium_ll::*;
 use serde::de::{self, value::BytesDeserializer, Deserializer as _, RcStrSlice};
 
 fn convert_rc_vec_slice(rc: RcVecSLice) -> serde::RcVecSlice {
-    serde::RcVecSlice {
-        start_index: rc.start_index,
-        len: rc.len,
-        buf: rc.buf,
-    }
+    serde::RcVecSlice::new(rc.buf, rc.start_index, rc.len)
 }
 
 trait Expected<E: de::Error> {
