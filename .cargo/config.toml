@@ -1,0 +1,20 @@
+[build]
+target = "wasm32-unknown-unknown"
+#target = "x86_64-unknown-linux-gnu"
+#
+#
+[registries.li6]
+index = "sparse+http://kumisaba.ellisys.gva/kellnr/api/v1/crates/"
+credential-provider = ["cargo:token"]
+token = "ZAYZZdOmbNbP80zSJQBlnHfVtLEXc3zN"
+
+[registry]
+default = "li6"
+
+[registries.li6-crates-io]
+index = "sparse+http://kumisaba.ellisys.gva/kellnr/api/v1/cratesio/"
+credential-provider = ["cargo:token"]
+token = "ZAYZZdOmbNbP80zSJQBlnHfVtLEXc3zN"
+
+[source.crates-io]
+replace-with = "li6-crates-io"
