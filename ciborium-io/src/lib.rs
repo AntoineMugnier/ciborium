@@ -122,6 +122,21 @@ impl<W: Write + ?Sized> Write for &mut W {
     }
 }
 
+impl<R: Read + ?Sized> Read for &mut R {
+    type Error = R::Error;
+
+    #[inline]
+    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
+        (**self).read_exact(index, data)
+    }
+
+    #[cfg(any(feature = "alloc", feature = "std"))]
+    #[inline]
+    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
+        (**self).to_rc_vec()
+    }
+}
+
 /// An error indicating there are no more bytes to read
 #[derive(Clone, Debug)]
 pub struct EndOfFile(());
