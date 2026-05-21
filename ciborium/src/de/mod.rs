@@ -9,11 +9,11 @@ pub use error::Error;
 use alloc::{string::String, vec::Vec};
 
 use crate::{simple_type::SimpleTypeAccess, tag::TagAccess};
-use ciborium_io::Read;
+use ciborium_io::ReadRc;
 use ciborium_ll::*;
 use serde::de::{self, value::BytesDeserializer, Deserializer as _, RcStrSlice};
 
-fn convert_rc_vec_slice(rc: RcVecSLice) -> serde::RcVecSlice {
+fn convert_rc_vec_slice(rc: RcVecSlice) -> serde::RcVecSlice {
     serde::RcVecSlice::new(rc.buf, rc.start_index, rc.len)
 }
 
@@ -62,7 +62,7 @@ pub struct Deserializer<R> {
 
 fn noop(_: u8) {}
 
-impl<R: Read> Deserializer<R>
+impl<R: ReadRc> Deserializer<R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -153,7 +153,7 @@ where
     }
 }
 
-impl<'de, R: Read> de::Deserializer<'de> for &mut Deserializer<R>
+impl<'de, R: ReadRc> de::Deserializer<'de> for &mut Deserializer<R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -734,7 +734,7 @@ where
 
 struct Access<'a, R>(&'a mut Deserializer<R>, Option<usize>);
 
-impl<'de, 'a, R: Read> de::SeqAccess<'de> for Access<'a, R>
+impl<'de, 'a, R: ReadRc> de::SeqAccess<'de> for Access<'a, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -763,7 +763,7 @@ where
     }
 }
 
-impl<'de, 'a, R: Read> de::MapAccess<'de> for Access<'a, R>
+impl<'de, 'a, R: ReadRc> de::MapAccess<'de> for Access<'a, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -800,7 +800,7 @@ where
     }
 }
 
-impl<'de, 'a, R: Read> de::EnumAccess<'de> for Access<'a, R>
+impl<'de, 'a, R: ReadRc> de::EnumAccess<'de> for Access<'a, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -817,7 +817,7 @@ where
     }
 }
 
-impl<'de, 'a, R: Read> de::VariantAccess<'de> for Access<'a, R>
+impl<'de, 'a, R: ReadRc> de::VariantAccess<'de> for Access<'a, R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -859,7 +859,7 @@ where
 /// Used for CBOR bytes decoded as a sequence.
 struct BytesAccess<R>(usize, Vec<u8>, core::marker::PhantomData<R>);
 
-impl<'de, R: Read> de::SeqAccess<'de> for BytesAccess<R>
+impl<'de, R: ReadRc> de::SeqAccess<'de> for BytesAccess<R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -891,7 +891,7 @@ where
 ///
 /// String and byte values are read into allocated buffers.
 #[inline]
-pub fn from_reader<T: de::DeserializeOwned, R: Read>(reader: R) -> Result<T, Error<R::Error>>
+pub fn from_reader<T: de::DeserializeOwned, R: ReadRc>(reader: R) -> Result<T, Error<R::Error>>
 where
     R::Error: core::fmt::Debug,
 {
@@ -910,7 +910,7 @@ where
 ///
 /// Set a high recursion limit at your own risk (of stack exhaustion)!
 #[inline]
-pub fn from_reader_with_recursion_limit<T: de::DeserializeOwned, R: Read>(
+pub fn from_reader_with_recursion_limit<T: de::DeserializeOwned, R: ReadRc>(
     reader: R,
     recurse_limit: usize,
 ) -> Result<T, Error<R::Error>>
@@ -928,7 +928,7 @@ where
 
 /// Returns a [`Deserializer`] wrapping the given [`Read`] reader.
 #[inline]
-pub fn deserializer_from_reader<R: Read>(reader: R) -> Deserializer<R>
+pub fn deserializer_from_reader<R: ReadRc>(reader: R) -> Deserializer<R>
 where
     R::Error: core::fmt::Debug,
 {
@@ -944,7 +944,7 @@ where
 ///
 /// Set a high recursion limit at your own risk (of stack exhaustion)!
 #[inline]
-pub fn deserializer_from_reader_with_recursion_limit<R: Read>(
+pub fn deserializer_from_reader_with_recursion_limit<R: ReadRc>(
     reader: R,
     recurse_limit: usize,
 ) -> Deserializer<R>

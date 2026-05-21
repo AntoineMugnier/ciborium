@@ -41,35 +41,146 @@ pub trait Read {
     type Error;
 
     /// Reads exactly `data.len()` bytes or fails
-    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error>;
-
-    /// Convert he reader to an Rc<Vec<u8>>.
-    #[cfg(any(feature = "alloc", feature = "std"))]
-    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error>;
+    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error>;
 }
 
-// A trait for zero-copy reading: borrows a slice directly from the input
-// with the input's own lifetime rather than copying into a caller-provided buffer.
-//
-// Only implementable for in-memory readers (e.g. `&'de [u8]`).
-//pub trait BorrowRead<'de>: Read {
-//    /// Returns a reference to the next `len` bytes, advancing past them.
-//    /// The returned lifetime `'de` is that of the original input, not of `self`.
-//    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], Self::Error>;
-//}
+/// A zero-copy read trait that returns a reference-counted slice
+///
+/// Implementors can hand back a view into an existing `Rc<Vec<u8>>` without
+/// copying any bytes.
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub trait ReadRc: Read {
+    /// Reads `len` bytes and returns them as an `RcVecSlice`
+    fn read_rc(&mut self, len: usize) -> Result<RcVecSlice, Self::Error>;
+}
 
-//#[cfg(any(feature = "alloc", feature = "std"))]
-//impl<'de> BorrowRead<'de> for &'de [u8] {
-//    #[inline]
-//    fn borrow_exact(&mut self, len: usize) -> Result<&'de [u8], EndOfFile> {
-//        if len > self.len() {
-//            return Err(EndOfFile(()));
-//        }
-//        let (prefix, suffix) = self.split_at(len);
-//        *self = suffix;
-//        Ok(prefix)
-//    }
-//}
+/// A zero-copy read trait that borrows directly from the input
+///
+/// Only implementable for in-memory readers whose backing storage outlives the
+/// borrow (e.g. `&'de [u8]`).
+pub trait BorrowRead: Read {
+    /// Returns a reference to the next `len` bytes, advancing past them.
+    fn borrow_read(&mut self, len: usize) -> Result<&[u8], Self::Error>;
+}
+
+/// A view into a reference-counted byte buffer
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub struct RcVecSlice {
+    /// The underlying buffer
+    pub buf: Rc<Vec<u8>>,
+    /// The start index of this slice within `buf`
+    pub start_index: usize,
+    /// The length of this slice
+    pub len: usize,
+}
+
+impl Read for &[u8] {
+    type Error = EndOfFile;
+
+    #[inline]
+    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
+        if data.len() > self.len() {
+            return Err(EndOfFile(()));
+        }
+        let (prefix, suffix) = self.split_at(data.len());
+        data.copy_from_slice(prefix);
+        *self = suffix;
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl ReadRc for &[u8] {
+    #[inline]
+    fn read_rc(&mut self, len: usize) -> Result<RcVecSlice, Self::Error> {
+        if len > self.len() {
+            return Err(EndOfFile(()));
+        }
+        let (prefix, suffix) = self.split_at(len);
+        *self = suffix;
+        let buf = Rc::new(prefix.to_vec());
+        Ok(RcVecSlice { buf, start_index: 0, len })
+    }
+}
+
+impl BorrowRead for &[u8] {
+    #[inline]
+    fn borrow_read(&mut self, len: usize) -> Result<&[u8], Self::Error> {
+        if len > self.len() {
+            return Err(EndOfFile(()));
+        }
+        let (prefix, suffix) = self.split_at(len);
+        *self = suffix;
+        Ok(prefix)
+    }
+}
+
+impl<R: Read + ?Sized> Read for &mut R {
+    type Error = R::Error;
+
+    #[inline]
+    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
+        (**self).read_exact(data)
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl<R: ReadRc + ?Sized> ReadRc for &mut R {
+    #[inline]
+    fn read_rc(&mut self, len: usize) -> Result<RcVecSlice, Self::Error> {
+        (**self).read_rc(len)
+    }
+}
+
+impl<R: BorrowRead + ?Sized> BorrowRead for &mut R {
+    #[inline]
+    fn borrow_read(&mut self, len: usize) -> Result<&[u8], Self::Error> {
+        (**self).borrow_read(len)
+    }
+}
+
+/// A buffered reader backed by a reference-counted byte vector
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub struct RcVecBuf {
+    /// The underlying buffer
+    pub rc: Rc<Vec<u8>>,
+    /// Current read position
+    pub cursor: usize,
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl Read for RcVecBuf {
+    type Error = EndOfFile;
+
+    #[inline]
+    fn read_exact(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
+        let end = self.cursor + data.len();
+        if end > self.rc.len() {
+            return Err(EndOfFile(()));
+        }
+        data.copy_from_slice(&self.rc[self.cursor..end]);
+        self.cursor = end;
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl ReadRc for RcVecBuf {
+    #[inline]
+    fn read_rc(&mut self, len: usize) -> Result<RcVecSlice, Self::Error> {
+        let end = self.cursor + len;
+        if end > self.rc.len() {
+            return Err(EndOfFile(()));
+        }
+        let slice = RcVecSlice {
+            buf: self.rc.clone(),
+            start_index: self.cursor,
+            len,
+        };
+        self.cursor = end;
+        Ok(slice)
+    }
+}
 
 /// A trait indicating a type that can add byte slices to its buffer
 pub trait WriteByteSlice<'a>: Write {
@@ -122,44 +233,9 @@ impl<W: Write + ?Sized> Write for &mut W {
     }
 }
 
-impl<R: Read + ?Sized> Read for &mut R {
-    type Error = R::Error;
-
-    #[inline]
-    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
-        (**self).read_exact(index, data)
-    }
-
-    #[cfg(any(feature = "alloc", feature = "std"))]
-    #[inline]
-    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
-        (**self).to_rc_vec()
-    }
-}
-
 /// An error indicating there are no more bytes to read
 #[derive(Clone, Debug)]
 pub struct EndOfFile(());
-
-impl Read for &[u8] {
-    type Error = EndOfFile;
-
-    #[inline]
-    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
-        if index + data.len() > self.len() {
-            return Err(EndOfFile(()));
-        }
-
-        data.copy_from_slice(&self[index..index + data.len()]);
-        Ok(())
-    }
-
-    #[cfg(any(feature = "alloc", feature = "std"))]
-    #[inline]
-    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
-        Ok(Rc::new(self.to_vec()))
-    }
-}
 
 #[cfg(any(feature = "alloc", feature = "std"))]
 /// A scatter-gather writer backed by a fixed scratch buffer for encoded bytes and
@@ -217,26 +293,6 @@ impl<'a, 'b> Write for ByteSliceWriter<'a, 'b> {
     }
 }
 
-#[cfg(any(feature = "alloc", feature = "std"))]
-impl Read for Rc<Vec<u8>> {
-    type Error = EndOfFile;
-
-    #[inline]
-    fn read_exact(&self, index: usize, data: &mut [u8]) -> Result<(), Self::Error> {
-        if index + data.len() > self.len() {
-            return Err(EndOfFile(()));
-        }
-
-        data.copy_from_slice(&self[index..index + data.len()]);
-        Ok(())
-    }
-
-    #[inline]
-    fn to_rc_vec(&self) -> Result<Rc<Vec<u8>>, Self::Error> {
-        Ok(self.clone())
-    }
-}
-
 /// An error indicating that the output cannot accept more bytes
 #[cfg(not(feature = "std"))]
 #[derive(Clone, Debug)]
@@ -286,35 +342,35 @@ mod test {
 
     #[test]
     fn read_eof() {
-        let reader = &[1u8; 0][..];
+        let mut reader = &[1u8; 0][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(0, &mut buffer[..]).unwrap_err();
+        reader.read_exact(&mut buffer[..]).unwrap_err();
     }
 
     #[test]
     fn read_one() {
-        let reader = &[1u8; 1][..];
+        let mut reader = &[1u8; 1][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(0, &mut buffer[..]).unwrap();
+        reader.read_exact(&mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(1, &mut buffer[..]).unwrap_err();
+        reader.read_exact(&mut buffer[..]).unwrap_err();
     }
 
     #[test]
     fn read_two() {
-        let reader = &[1u8; 2][..];
+        let mut reader = &[1u8; 2][..];
         let mut buffer = [0u8; 1];
 
-        reader.read_exact(0, &mut buffer[..]).unwrap();
+        reader.read_exact(&mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(1, &mut buffer[..]).unwrap();
+        reader.read_exact(&mut buffer[..]).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read_exact(2, &mut buffer[..]).unwrap_err();
+        reader.read_exact(&mut buffer[..]).unwrap_err();
     }
 
     #[test]
@@ -366,5 +422,38 @@ mod test {
 
         writer.write_all(&[1u8; 1][..]).unwrap();
         writer.write_all(&[1u8; 1][..]).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn borrow_read_slice() {
+        let mut reader = &[1u8, 2u8, 3u8][..];
+        let chunk = reader.borrow_read(2).unwrap();
+        assert_eq!(chunk, &[1u8, 2u8]);
+        assert_eq!(reader, &[3u8]);
+    }
+
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn rc_vec_buf_read() {
+        use std::rc::Rc;
+        let mut buf = RcVecBuf { rc: Rc::new(vec![10u8, 20u8, 30u8]), cursor: 0 };
+        let mut data = [0u8; 2];
+        buf.read_exact(&mut data).unwrap();
+        assert_eq!(data, [10u8, 20u8]);
+        assert_eq!(buf.cursor, 2);
+        buf.read_exact(&mut data).unwrap_err();
+    }
+
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn rc_vec_buf_read_rc() {
+        use std::rc::Rc;
+        let mut buf = RcVecBuf { rc: Rc::new(vec![10u8, 20u8, 30u8]), cursor: 0 };
+        let slice = buf.read_rc(2).unwrap();
+        assert_eq!(buf.cursor, 2);
+        assert_eq!(slice.start_index, 0);
+        assert_eq!(slice.len, 2);
+        assert_eq!(&slice.buf[slice.start_index..slice.start_index + slice.len], &[10u8, 20u8]);
     }
 }

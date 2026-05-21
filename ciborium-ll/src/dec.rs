@@ -3,23 +3,10 @@
 use super::*;
 
 use ciborium_io::Read;
-
-#[cfg(feature = "std")]
-use std::{rc::Rc, vec::Vec};
-
-#[cfg(all(feature = "alloc", not(feature = "std")))]
-use alloc::{rc::Rc, vec::Vec};
-
 #[cfg(any(feature = "alloc", feature = "std"))]
-/// The returned lifetime `'de` is that of the original input, not of `self`.
-pub struct RcVecSLice {
-    /// The returned lifetime `'de` is that of the original input, not of `self`.
-    pub buf: Rc<Vec<u8>>,
-    /// The returned lifetime `'de` is that of the original input, not of `self`.
-    pub start_index: usize,
-    /// The returned lifetime `'de` is that of the original input, not of `self`.
-    pub len: usize,
-}
+use ciborium_io::ReadRc;
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub use ciborium_io::RcVecSlice;
 
 /// An error that occurred while decoding
 #[derive(Clone, Debug)]
@@ -63,7 +50,7 @@ impl Default for Decoder {
 }
 
 impl Decoder {
-    /// Reads exactly `data.len()` bytes at the current offset, advancing the offset.
+    /// Reads exactly `data.len()` bytes from the reader, advancing the offset.
     #[inline]
     pub fn read_exact<R: Read>(
         &mut self,
@@ -71,7 +58,7 @@ impl Decoder {
         data: &mut [u8],
     ) -> Result<(), R::Error> {
         assert!(self.buffer.is_none());
-        reader.read_exact(self.offset, data)?;
+        reader.read_exact(data)?;
         self.offset += data.len();
         Ok(())
     }
@@ -115,8 +102,11 @@ impl Decoder {
     #[inline]
     fn push_title(&mut self, item: Title) {
         assert!(self.buffer.is_none());
-        self.buffer = Some(item);
+        // The bytes for this title have already been consumed from the reader
+        // and counted in self.offset. We subtract them back so that offset()
+        // reports the position before this title.
         self.offset -= item.1.as_ref().len() + 1;
+        self.buffer = Some(item);
     }
 
     /// Pulls the next header from the input
@@ -140,27 +130,22 @@ impl Decoder {
         self.push_title(Title::from(item))
     }
 
-    /// Reads the next `len` bytes into a reference-counted buffer.
+    /// Reads the next `len` bytes as a reference-counted slice.
     ///
-    /// Calls `to_rc_vec` on the reader to obtain the whole backing buffer, then
-    /// records `(start_index, len)` without copying. Only use this when the
-    /// caller needs ownership via `RcVecSLice` (e.g. `deserialize_byte_rc`).
+    /// Delegates to `ReadRc::read_rc` so no copying occurs when the reader
+    /// already owns an `Rc<Vec<u8>>` (e.g. `RcVecBuf`). For readers that must
+    /// allocate (e.g. `&[u8]`), a single `Vec` allocation is made.
     #[cfg(any(feature = "alloc", feature = "std"))]
     #[inline]
-    pub fn read_exact_rc<R: Read>(
+    pub fn read_exact_rc<R: ReadRc>(
         &mut self,
         reader: &mut R,
         len: usize,
-    ) -> Result<RcVecSLice, Error<R::Error>> {
+    ) -> Result<RcVecSlice, Error<R::Error>> {
         assert!(self.buffer.is_none());
-        let buf = reader.to_rc_vec().map_err(Error::Io)?;
-        let result = RcVecSLice {
-            buf,
-            start_index: self.offset,
-            len,
-        };
+        let slice = reader.read_rc(len).map_err(Error::Io)?;
         self.offset += len;
-        Ok(result)
+        Ok(slice)
     }
 
     /// Gets the current byte offset into the stream
