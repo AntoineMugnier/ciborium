@@ -99,7 +99,11 @@ impl ReadRc for &[u8] {
         let (prefix, suffix) = self.split_at(len);
         *self = suffix;
         let buf = Rc::new(prefix.to_vec());
-        Ok(RcVecSlice { buf, start_index: 0, len })
+        Ok(RcVecSlice {
+            buf,
+            start_index: 0,
+            len,
+        })
     }
 }
 
@@ -146,6 +150,14 @@ pub struct RcVecBuf {
     pub rc: Rc<Vec<u8>>,
     /// Current read position
     pub cursor: usize,
+}
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+impl RcVecBuf {
+    /// Create a new RcVecBuf
+    pub fn new(rc: Rc<Vec<u8>>, cursor: usize) -> Self {
+        Self { rc, cursor }
+    }
 }
 
 #[cfg(any(feature = "alloc", feature = "std"))]
@@ -271,6 +283,10 @@ impl<'a, 'b> WriteByteSlice<'a> for ByteSliceWriter<'a, 'b> {
 impl<'a, 'b> Write for ByteSliceWriter<'a, 'b> {
     type Error = EndOfFile;
     fn write_all(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
         if data.len() > self.buf.len() {
             return Err(EndOfFile(()));
         }
@@ -437,7 +453,10 @@ mod test {
     #[cfg(feature = "alloc")]
     fn rc_vec_buf_read() {
         use std::rc::Rc;
-        let mut buf = RcVecBuf { rc: Rc::new(vec![10u8, 20u8, 30u8]), cursor: 0 };
+        let mut buf = RcVecBuf {
+            rc: Rc::new(vec![10u8, 20u8, 30u8]),
+            cursor: 0,
+        };
         let mut data = [0u8; 2];
         buf.read_exact(&mut data).unwrap();
         assert_eq!(data, [10u8, 20u8]);
@@ -449,11 +468,17 @@ mod test {
     #[cfg(feature = "alloc")]
     fn rc_vec_buf_read_rc() {
         use std::rc::Rc;
-        let mut buf = RcVecBuf { rc: Rc::new(vec![10u8, 20u8, 30u8]), cursor: 0 };
+        let mut buf = RcVecBuf {
+            rc: Rc::new(vec![10u8, 20u8, 30u8]),
+            cursor: 0,
+        };
         let slice = buf.read_rc(2).unwrap();
         assert_eq!(buf.cursor, 2);
         assert_eq!(slice.start_index, 0);
         assert_eq!(slice.len, 2);
-        assert_eq!(&slice.buf[slice.start_index..slice.start_index + slice.len], &[10u8, 20u8]);
+        assert_eq!(
+            &slice.buf[slice.start_index..slice.start_index + slice.len],
+            &[10u8, 20u8]
+        );
     }
 }

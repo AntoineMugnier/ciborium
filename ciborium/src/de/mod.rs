@@ -9,14 +9,13 @@ pub use error::Error;
 use alloc::{string::String, vec::Vec};
 
 use crate::{simple_type::SimpleTypeAccess, tag::TagAccess};
+pub use ciborium_io::RcVecBuf;
 use ciborium_io::ReadRc;
 use ciborium_ll::*;
 use serde::de::{self, value::BytesDeserializer, Deserializer as _, RcStrSlice};
-
 fn convert_rc_vec_slice(rc: RcVecSlice) -> serde::RcVecSlice {
     serde::RcVecSlice::new(rc.buf, rc.start_index, rc.len)
 }
-
 trait Expected<E: de::Error> {
     fn expected(self, kind: &'static str) -> E;
 }
@@ -171,7 +170,7 @@ where
                 Err(..) => self.deserialize_i128(visitor),
             },
 
-            Header::Bytes(..) => self.deserialize_byte_buf(visitor),
+            Header::Bytes(..) => self.deserialize_byte_rc(visitor),
             Header::Text(..) => self.deserialize_string(visitor),
 
             Header::Array(..) => self.deserialize_seq(visitor),
